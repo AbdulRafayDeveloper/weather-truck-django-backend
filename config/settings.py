@@ -4,9 +4,8 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load environment variables strictly from backend/.env
-ENV_FILE = BASE_DIR / '.env'
-load_dotenv(ENV_FILE)
+# Local development reads settings from a .env file next to manage.py.
+load_dotenv(BASE_DIR / '.env')
 
 SECRET_KEY = os.environ.get(
     'DJANGO_SECRET_KEY',
@@ -23,7 +22,7 @@ ALLOWED_HOSTS = [
 render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
 if render_host and render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(render_host)
-# Vercel serverless deployments (production + preview domains)
+# Vercel serves production and preview deployments from *.vercel.app.
 if os.environ.get('VERCEL') and '.vercel.app' not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append('.vercel.app')
 
@@ -98,7 +97,7 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Explicit CORS allowlist (FRONTEND_URL accepts a comma-separated list)
+# FRONTEND_URL may hold several origins separated by commas.
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 CORS_ALLOWED_ORIGINS = list(
     dict.fromkeys([
@@ -108,7 +107,6 @@ CORS_ALLOWED_ORIGINS = list(
     ])
 )
 
-# External service credentials and endpoints
 TOMTOM_API_KEY = os.environ.get('TOMTOM_API_KEY', '')
 OPEN_METEO_BASE_URL = os.environ.get(
     'OPEN_METEO_BASE_URL',

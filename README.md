@@ -1,111 +1,90 @@
-# Weather-Aware Truck Routing — Backend API
+# Weather-Aware Truck Routing: Backend API
 
-Django REST API for the Weather-Aware Truck Routing system. It geocodes the trip, requests three commercial truck route alternatives, samples hourly weather at each checkpoint using the truck's estimated arrival time, classifies risk with the required risk and load rules, and recommends the safest route.
+Django REST API that helps a truck driver pick the safest route. It geocodes the trip, asks TomTom for three truck routes, checks the hourly forecast at each checkpoint for the time the truck will actually be there, applies the risk and load rules, and recommends a route.
 
-**Live API:** https://weather-truck-backend.vercel.app
-**Live app:** https://weathertruck.vercel.app ([frontend repository](https://github.com/AbdulRafayDeveloper/weather-truck))
+- **Live API:** https://weather-truck-backend.vercel.app
+- **Live app:** https://weathertruck.vercel.app ([frontend repo](https://github.com/AbdulRafayDeveloper/weather-truck))
 
-### Requirements Coverage
+## Requirements coverage
 
-| Requirement | Implementation |
+| Requirement | Where it lives |
 |---|---|
-| Inputs: origin, destination, departure, load weight | `POST /api/routes/` with validation (plus `interval_miles`) |
-| 3 route options via a routing API | TomTom Routing API, `travelMode=truck`, up to 3 alternatives |
-| Weather every 10 / 25 / 50 miles at the truck's ETA | Checkpoints at the chosen interval; ETA interpolated per checkpoint; Open-Meteo hourly forecast matched to that ETA |
-| Risk thresholds and load rules | `routes/risk.py`, thresholds and load overrides exactly as specified (see Section 4) |
-| Recommendation (Severe miles → High miles → avg risk → travel time) | `evaluate_route_recommendations` in `routes/risk.py`; routes with No Travel miles are not eligible |
-| Map, heatmap and 0–48 h slider | Implemented in the [frontend](https://github.com/AbdulRafayDeveloper/weather-truck); the slider re-calls this API with a shifted departure time |
+| Origin, destination, departure time, load weight | `POST /api/routes/`, validated in `routes/views.py` (plus an optional `interval_miles`) |
+| Three route options from a routing API | TomTom Routing API with `travelMode=truck` and two alternatives |
+| Weather every 10 / 25 / 50 miles at the truck's ETA | Checkpoints and ETAs in `routes/services.py`, matched to the Open-Meteo hourly forecast |
+| Risk thresholds and load rules | `routes/risk.py` (tables below) |
+| Recommendation: Severe miles, then High miles, then average risk, then travel time | `evaluate_route_recommendations` in `routes/risk.py` |
+| Map, heatmap and 0–48 h slider | In the [frontend](https://github.com/AbdulRafayDeveloper/weather-truck). The slider calls this API again with a later departure time. |
 
----
+## Tech stack
 
-## 1. Tech Stack
+- Python 3.11+, Django 5, Django REST Framework, django-cors-headers, requests
+- TomTom Geocoding API and Routing API
+- Open-Meteo hourly forecast (`wind_speed_10m`, `rain`, `snowfall`)
 
-- **Python:** 3.11+ / 3.12+
-- **Framework:** Django 5.x + Django REST Framework (DRF)
-- **CORS:** django-cors-headers
-- **HTTP Client:** requests
-- **External APIs:**
-  - TomTom Geocoding API v2 (structured address search with ambiguity detection)
-  - TomTom Maps Routing API v1 (`calculateRoute` with `travelMode=truck` and `extendedRouteRepresentation=distance,travelTime`)
-  - Open-Meteo Forecast API (hourly `wind_speed_10m`, `rain`, `snowfall`)
+## How it works
 
----
+1. **Geocoding.** Both locations go through TomTom. If the top two matches score the same but are more than 25 km apart (think "Springfield"), the API asks the user to be more specific instead of guessing.
+2. **Routing.** TomTom returns up to three truck routes. Sections TomTom marks as not designated for trucks are flagged with a warning.
+3. **Checkpoints.** A checkpoint is placed at mile 0, every `interval_miles`, and at the destination. The positions come from walking the actual road polyline once.
+4. **ETAs.** TomTom's progress markers give distance and travel time at some points along the route. These are spread over the whole polyline, so each checkpoint gets an arrival time that reflects the real road. Times keep the origin's UTC offset, and `eta_unix` holds the UTC timestamp. If TomTom sends no usable progress data, the ETAs fall back to a straight-line estimate and the route carries `"progress_source": "interpolated_fallback"` and a warning.
+5. **Weather.** Checkpoints from all routes are deduplicated (to about 11 m) and fetched from Open-Meteo in batches of up to 50 locations. Each checkpoint uses the forecast hour closest to its ETA, within 30 minutes. On an exact tie the later hour wins. Missing values are reported as `partial` or `unavailable`, never treated as safe.
+6. **Risk and recommendation.** Each checkpoint gets a level for wind, rain and snow, and the worst of the three becomes its overall level. The miles of the segment leading to that checkpoint are added to that level's total, and the route with the best ranking is recommended.
 
-## 2. Key Capabilities
+## Risk rules
 
-1. **Status & Health Endpoints:** `GET /` (service status and endpoint list) and `GET /api/health/`
-   - Returns service health status and CORS headers for frontend consumption.
-2. **Truck Route Alternatives:** `POST /api/routes/`
-   - Accepts origin, destination, departure datetime (ISO 8601), cargo load weight in pounds (`load_weight_lb`), and sampling interval (`interval_miles`: 10, 25, 50; default 25).
-   - Validates coordinates and resolves geographical ambiguity via TomTom Geocoding API v2.
-   - Calculates up to 3 genuine alternative truck routes using TomTom Maps Routing API v1 with vehicle travel mode `truck`.
-   - Inspects route sections for non-truck segments (`sectionType == "TRAVEL_MODE"` and `travelMode == "other"`).
-3. **Checkpoint Generation & Progress Mapping:**
-   - Single-pass cumulative Haversine distance walking ($O(N + M)$) along multi-leg geometry.
-   - Maps TomTom's sparse progress markers onto the flattened road polyline.
-   - Generates checkpoints at Mile 0 (origin), every `interval_miles` increment, and the exact destination.
-   - Handles edge-case partial segments without skipping sampling milestones or duplicating endpoints.
-4. **Timezone-Aware ETA Interpolation:**
-   - Interpolates travel time between surrounding progress markers based on actual road curvature and distance.
-   - Preserves origin-local timezone offsets in ISO 8601 strings and generates accurate UTC Unix timestamps (`eta_unix`).
-   - Ensures monotonic checkpoint arrival times matching the provider arrival instant.
-5. **Progress Fallback:**
-   - Deterministically falls back to linear interpolation if provider progress is omitted or unusable, flagging `"progress_source": "interpolated_fallback"` with route warnings.
-6. **Open-Meteo Hourly Weather Integration:**
-   - Batched multi-location hourly weather fetching across all route checkpoints (max 50 unique coordinates per request batch).
-   - Deduplicates coordinates across overlapping routes to ~11m precision (4 decimal places).
-   - Nearest-hour timestamp matching ($\le 30$ min window) with conservative upward tie-breaking.
-   - Standardized checkpoint weather payloads (`available`, `partial`, `unavailable`) with wind speed (mph), rain (in), and snowfall (in).
-7. **Weather Risk Scoring & Safe Route Recommendation:**
-   - Exact 5-tier environmental hazard scale: `Low < Moderate < High < Severe < No Travel`.
-   - Cargo load-dependent wind overrides (>30,000 lb and >40,000 lb) applied before overall checkpoint risk determination.
-   - Route-level segment distance aggregation (`low_miles`, `moderate_miles`, `high_miles`, `severe_miles`, `no_travel_miles`, `unassessed_miles`).
-   - Distance-weighted average risk calculation (`Low=1, Moderate=2, High=3, Severe=4`, strictly `null` if any `no_travel_miles` or `unassessed_miles` exist).
-   - Hierarchical route recommendation: Fewest Severe miles $\to$ Fewest High miles $\to$ Lowest Average Risk $\to$ Shortest Travel Time $\to$ Provider Route Order.
-   - Dynamic, factual recommendation explanation attributing the exact ranking criterion or tie-breaker that selected the winning route.
-   - Accurate safety status semantics: `"recommended"` (with incomplete coverage notice if alternative routes lack data), `"no_safe_route"` (`"No safe route available under current weather conditions."`), or `"incomplete_weather"`.
+| Condition | Low | Moderate | High | Severe | No Travel |
+|---|---|---|---|---|---|
+| Wind (mph) | under 25 | 25 to under 35 | 35 to under 45 | 45 to under 55 | 55 or more |
+| Rain (in/hr) | under 0.10 | 0.10 to 0.25 | over 0.25 to 0.50 | over 0.50 to 1.00 | over 1.00 |
+| Snow (in/hr) | under 0.5 | 0.5 to 1.0 | over 1.0 to 2.0 | over 2.0 to 3.0 | over 3.0 |
 
----
+Where the brief's ranges touch (for example rain at exactly 0.25), the value goes to the lower level.
 
-## 3. Weather Data Attribution & Integration Details
+**Load rules for wind:**
+- 55 mph or more is No Travel for any load.
+- 45 to 54 mph with a load over 30,000 lb is No Travel.
+- 35 to 44 mph with a load over 40,000 lb is Severe.
 
-Weather forecasts are provided by [Open-Meteo](https://open-meteo.com/):
-> **Weather data by Open-Meteo.com** ([https://open-meteo.com/](https://open-meteo.com/)), used under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+**Average risk** is distance-weighted: Low = 1, Moderate = 2, High = 3, Severe = 4, divided by the route length. It is `null` when a route has any No Travel miles or any miles without weather data, since a number there would be misleading.
 
-- **Variables & Units:** `wind_speed_10m` (mph), `rain` (inches), `snowfall` (inches).
-- **Time Format:** UTC Unix timestamps (`timeformat=unixtime`).
-- **Forecast Coverage:** 7-day hourly horizon (`forecast_days=7`).
-- **Matching Tolerance:** Checkpoint ETA is matched against hourly forecast within a 30-minute ($\pm 1800$s) window; ties at exactly 30 minutes round upward to the later hour.
-- **Licensing Notice:** Non-commercial use does not require an API key; commercial deployment requires an Open-Meteo commercial subscription or self-hosted instance.
+**Recommendation.** Only routes that are fully assessed and have no No Travel miles can be recommended. They are ranked by:
+1. Fewest Severe miles
+2. Fewest High miles
+3. Lowest average risk
+4. Shortest travel time
+5. TomTom's own order, if everything else is equal
 
----
+The `message` says which of these rules decided the result.
 
-## 4. Risk Engine & Recommendation Specification
+| `status` | Meaning |
+|---|---|
+| `recommended` | A route was picked. If some other routes lack weather data, the message says so. |
+| `no_safe_route` | Every route has No Travel miles. Message: "No safe route available under current weather conditions." |
+| `incomplete_weather` | No route could be confirmed safe because weather data is missing. Message: "Route safety could not be fully assessed because weather data is missing." |
 
-### Environmental Hazard Breakpoints
+## API
 
-| Hazard | Low | Moderate | High | Severe | No Travel |
-|:---|:---|:---|:---|:---|:---|
-| **Wind** | $< 25\,\text{mph}$ | $25 \le \text{wind} < 35\,\text{mph}$ | $35 \le \text{wind} < 45\,\text{mph}$ | $45 \le \text{wind} < 55\,\text{mph}$ | $\ge 55\,\text{mph}$ |
-| **Rain** | $< 0.10\,\text{in/hr}$ | $0.10 \le \text{rain} \le 0.25\,\text{in/hr}$ | $0.25 < \text{rain} \le 0.50\,\text{in/hr}$ | $0.50 < \text{rain} \le 1.00\,\text{in/hr}$ | $> 1.00\,\text{in/hr}$ |
-| **Snowfall** | $< 0.5\,\text{in/hr}$ | $0.5 \le \text{snow} \le 1.0\,\text{in/hr}$ | $1.0 < \text{snow} \le 2.0\,\text{in/hr}$ | $2.0 < \text{snow} \le 3.0\,\text{in/hr}$ | $> 3.0\,\text{in/hr}$ |
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | Service status and list of endpoints |
+| GET | `/api/health/` | Health check: `{"status": "ok"}` |
+| POST | `/api/routes/` | Routes, weather, risk and recommendation |
 
-### Cargo Weight Overrides (Wind)
-1. **Wind $\ge 55\,\text{mph}$:** `No Travel`, regardless of cargo load.
-2. **Wind $45 \le \text{wind} < 55\,\text{mph}$ AND cargo weight $> 30,000\,\text{lb}$:** Overridden to `No Travel`.
-3. **Wind $35 \le \text{wind} < 45\,\text{mph}$ AND cargo weight $> 40,000\,\text{lb}$:** Overridden to `Severe`.
+Request:
 
-### Distance-Weighted Average Risk
-For routes that are fully assessed (`unassessed_miles == 0.0`) and have zero `no_travel_miles`:
-$$\text{average\_risk} = \frac{\sum (\text{segment\_miles} \times \text{weight})}{\text{total\_route\_miles}}$$
-Weights: $\text{Low} = 1$, $\text{Moderate} = 2$, $\text{High} = 3$, $\text{Severe} = 4$.  
-*If any `no_travel_miles > 0.0` or `unassessed_miles > 0.0`, `average_risk` is returned strictly as `null`.*
+```json
+{
+  "origin": "Chicago, IL",
+  "destination": "Denver, CO",
+  "departure": "2026-11-03T08:00:00",
+  "load_weight_lb": 38000,
+  "interval_miles": 25
+}
+```
 
----
+Response (shortened):
 
-## 5. API Response Contract & Example
-
-`POST /api/routes/` returns:
 ```json
 {
   "recommendation": {
@@ -167,123 +146,73 @@ Weights: $\text{Low} = 1$, $\text{Moderate} = 2$, $\text{High} = 3$, $\text{Seve
 }
 ```
 
-### Recommendation Status Values:
-- `"recommended"`: A fully assessed safe route was selected using the ranking hierarchy.
-- `"no_safe_route"`: All alternative routes were fully assessed, but every route contains `no_travel_miles > 0.0`. Exact message: `"No safe route available under current weather conditions."`
-- `"incomplete_weather"`: No safe route could be confirmed because one or more routes had incomplete weather forecast data. Exact message: `"Route safety could not be fully assessed because weather data is missing."`
+Errors come back as `{"error": {"code": "...", "message": "..."}}` with a matching HTTP status, for example `VALIDATION_ERROR` (400), `GEOCODE_NOT_FOUND` (404), `ROUTE_NOT_FOUND` (404) or `PROVIDER_ERROR` (502).
 
----
-
-## 6. Project Structure
+## Project structure
 
 ```text
 weather-truck-django-backend/
 ├── config/
-│   ├── settings.py      # Environment-driven settings, CORS, allowed hosts
-│   ├── urls.py          # Root status endpoint + /api/ routes
-│   └── wsgi.py          # WSGI entry point (exposed as `app` for Vercel)
+│   ├── settings.py      # Settings from environment variables, CORS, hosts
+│   ├── urls.py          # Status page and /api/ routes
+│   └── wsgi.py          # WSGI entry point, exposed as `app` for Vercel
 ├── routes/
-│   ├── services.py      # TomTom routing/geocoding, checkpoints, ETAs, Open-Meteo weather
-│   ├── risk.py          # Risk thresholds, load rules, aggregation, recommendation
-│   ├── utils.py         # Geometry and time helpers (Haversine, interpolation)
-│   ├── views.py         # API views and request validation
+│   ├── services.py      # TomTom, checkpoints, ETAs, Open-Meteo
+│   ├── risk.py          # Risk rules, route totals, recommendation
+│   ├── utils.py         # Distance and interpolation helpers
+│   ├── views.py         # Endpoints and request validation
 │   ├── urls.py
-│   └── tests.py         # 110 automated tests
+│   └── tests.py
 ├── .env.example
 ├── manage.py
 ├── requirements.txt
-├── vercel.json          # Vercel deployment configuration
-├── render.yaml          # Alternative Render deployment configuration
+├── vercel.json
+├── render.yaml
 └── Procfile
 ```
 
----
+## Running locally
 
-## 7. Getting Started
+You need Python 3.11+ and a TomTom API key.
 
-### Prerequisites
-
-- Python 3.11 or higher
-- A TomTom Developer API Key
-
-### Installation
-
-1. Create and activate a Python virtual environment:
-   ```bash
-   python -m venv .venv
-   # Windows (PowerShell):
-   .venv\Scripts\Activate.ps1
-   # Linux / macOS:
-   source .venv/bin/activate
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Set up environment variables (for live application execution):
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` and supply your TomTom API key:
-   ```ini
-   TOMTOM_API_KEY=your_actual_tomtom_api_key
-   OPEN_METEO_BASE_URL=https://api.open-meteo.com/v1/forecast
-   DJANGO_SECRET_KEY=your-secure-secret-key
-   DJANGO_DEBUG=True
-   DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
-   FRONTEND_URL=http://localhost:5173
-   ```
-   > **Note:** A valid `TOMTOM_API_KEY` is required only for live application operation (`runserver`). The automated test suite is completely independent of local `.env` configuration and does not require a real API key or `.env` file.
-
----
-
-## 8. Running the Backend (Live Application)
-
-Start the Django development server (requires `.env` with a valid `TOMTOM_API_KEY`):
 ```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cp .env.example .env             # then add your TOMTOM_API_KEY
 python manage.py runserver 127.0.0.1:8000
 ```
 
-Verify service health:
+Check it's up:
+
 ```bash
 curl http://127.0.0.1:8000/api/health/
 # {"status":"ok"}
 ```
 
----
+## Tests
 
-## 9. Running Automated Tests
-
-Run the complete test suite (110 automated tests covering routing, progress mapping, checkpoint sampling, Open-Meteo weather integration, risk scoring, distance aggregation, and safe route recommendation):
 ```bash
 python manage.py test routes
 ```
 
-**Test Isolation & Offline Execution:**
-- **No `.env` file required:** The test suite uses Django's `@override_settings` for endpoint configuration and executes out of the box in fresh clones.
-- **Zero external network calls:** All outbound requests to TomTom Maps and Open-Meteo APIs are mocked using `unittest.mock.patch`.
-- **No real credentials needed:** Tests execute completely offline without live provider keys.
+There are 114 tests covering geocoding, routing, checkpoint placement, ETAs, weather matching, every risk threshold, the load rules and the recommendation order. TomTom and Open-Meteo are mocked, so the tests run offline and don't need a `.env` file or an API key.
 
-Run Django system check:
-```bash
-python manage.py check
-```
+## Deployment
 
----
+The API runs on Vercel and redeploys on every push to `main`. `vercel.json` sends all requests to `config/wsgi.py`.
 
-## 10. Deployment
-
-Deployed on **Vercel** (Python runtime) with continuous deployment from the `main` branch. `vercel.json` routes all requests to `config/wsgi.py`.
-
-| Environment variable | Description |
+| Variable | Value |
 |---|---|
-| `TOMTOM_API_KEY` | TomTom Routing & Geocoding API key |
+| `TOMTOM_API_KEY` | TomTom API key |
 | `OPEN_METEO_BASE_URL` | `https://api.open-meteo.com/v1/forecast` |
-| `DJANGO_SECRET_KEY` | Strong random secret |
-| `DJANGO_DEBUG` | `False` in production |
-| `DJANGO_ALLOWED_HOSTS` | e.g. `.vercel.app` (`*.vercel.app` is also added automatically on Vercel) |
-| `FRONTEND_URL` | Comma-separated frontend origins allowed by CORS |
+| `DJANGO_SECRET_KEY` | A long random string |
+| `DJANGO_DEBUG` | `False` |
+| `DJANGO_ALLOWED_HOSTS` | e.g. `.vercel.app` (added automatically on Vercel) |
+| `FRONTEND_URL` | Frontend origin(s) for CORS, comma-separated |
 
-A `render.yaml` and `Procfile` are also included for deployment on Render with Gunicorn.
+`render.yaml` and `Procfile` are kept for running on Render with Gunicorn.
+
+## Attribution
+
+Weather data by [Open-Meteo.com](https://open-meteo.com/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Open-Meteo is free for non-commercial use; commercial use needs their paid plan or a self-hosted instance.

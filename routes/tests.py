@@ -125,7 +125,7 @@ class UnitConversionTests(SimpleTestCase):
         self.assertEqual(seconds_to_minutes(51000), 850)
 
     def test_haversine_distance(self):
-        # Distance between Chicago and Denver is roughly ~1470 km
+        # Chicago to Denver is roughly 1470 km
         chicago = {'latitude': 41.8781, 'longitude': -87.6298}
         denver = {'latitude': 39.7392, 'longitude': -104.9903}
         dist = haversine_distance(chicago, denver)
@@ -349,14 +349,14 @@ class TomTomRoutingTests(SimpleTestCase):
         self.assertIn('41.88323,-87.6324:39.7392,-104.9903', called_url)
 
         called_params = mock_get.call_args[1]['params']
-        # Verify repeated extendedRouteRepresentation parameters are sent as tuples
+        # extendedRouteRepresentation is sent twice, so params must be a list of tuples
         self.assertIn(('extendedRouteRepresentation', 'distance'), called_params)
         self.assertIn(('extendedRouteRepresentation', 'travelTime'), called_params)
         self.assertIn(('travelMode', 'truck'), called_params)
         self.assertIn(('maxAlternatives', 2), called_params)
         self.assertIn(('departAt', '2026-11-03T08:00:00'), called_params)
 
-        # Verify load_weight is NOT sent to TomTom as vehicleWeight or gross weight
+        # Load weight stays on our side; TomTom never sees it
         param_keys = [p[0] for p in called_params]
         self.assertNotIn('vehicleWeight', param_keys)
         self.assertNotIn('vehicleGrossWeight', param_keys)
@@ -462,8 +462,7 @@ class TomTomRoutingTests(SimpleTestCase):
 
 class CheckpointGenerationTests(SimpleTestCase):
     def setUp(self):
-        # A simple 100-mile route fixture (160934.4 meters), 2 hours duration (7200 seconds)
-        # 5 geometry points forming a line
+        # 100-mile route (160934.4 m) taking 2 hours
         self.points = [
             {'latitude': 40.0, 'longitude': -90.0},
             {'latitude': 40.0, 'longitude': -89.5},
@@ -471,7 +470,7 @@ class CheckpointGenerationTests(SimpleTestCase):
             {'latitude': 40.0, 'longitude': -88.5},
             {'latitude': 40.0, 'longitude': -88.0},
         ]
-        self.total_m = 160934.4  # Exactly 100.0 miles
+        self.total_m = 160934.4  # 100.0 miles
         self.total_s = 7200      # 2 hours
         self.dep_time = '2026-11-03T08:00:00-06:00'
         # Progress markers at points 0, 2, 4
@@ -481,24 +480,23 @@ class CheckpointGenerationTests(SimpleTestCase):
             {'point_index': 4, 'distance_meters': 160934.4, 'travel_time_seconds': 7200},
         ]
 
-    # --- SAMPLING TESTS ---
     def test_25_mile_intervals_sampling(self):
         cps = generate_checkpoints(self.points, self.progress, self.total_m, self.total_s, self.dep_time, 25)
-        # Expected: 0, 25, 50, 75, 100 -> exactly 5 checkpoints
+        # 0, 25, 50, 75, 100
         self.assertEqual(len(cps), 5)
         markers = [cp['mile_marker'] for cp in cps]
         self.assertEqual(markers, [0.0, 25.0, 50.0, 75.0, 100.0])
 
     def test_10_mile_intervals_sampling(self):
         cps = generate_checkpoints(self.points, self.progress, self.total_m, self.total_s, self.dep_time, 10)
-        # Expected: 0, 10, 20, ..., 100 -> 11 checkpoints
+        # 0, 10, 20, ..., 100
         self.assertEqual(len(cps), 11)
         self.assertEqual(cps[0]['mile_marker'], 0.0)
         self.assertEqual(cps[-1]['mile_marker'], 100.0)
 
     def test_50_mile_intervals_sampling(self):
         cps = generate_checkpoints(self.points, self.progress, self.total_m, self.total_s, self.dep_time, 50)
-        # Expected: 0, 50, 100 -> 3 checkpoints
+        # 0, 50, 100
         self.assertEqual(len(cps), 3)
         markers = [cp['mile_marker'] for cp in cps]
         self.assertEqual(markers, [0.0, 50.0, 100.0])
@@ -551,7 +549,6 @@ class CheckpointGenerationTests(SimpleTestCase):
         self.assertEqual([cp['mile_marker'] for cp in cps], [0.0, 50.0, 100.0, 106.3])
         self.assertEqual(cps[-1]['segment_miles'], 6.3)
 
-    # --- GEOMETRY TESTS ---
     def test_multiple_route_legs_geometry(self):
         leg1 = [{'latitude': 40.0, 'longitude': -90.0}, {'latitude': 40.5, 'longitude': -89.5}]
         leg2 = [{'latitude': 40.5, 'longitude': -89.5}, {'latitude': 41.0, 'longitude': -89.0}]
@@ -600,7 +597,6 @@ class CheckpointGenerationTests(SimpleTestCase):
             self.assertEqual(cp['latitude'], 0.0)
             self.assertTrue(0.0 <= cp['longitude'] <= 2.0)
 
-    # --- PROGRESS TESTS ---
     def test_progress_marker_cleaning_and_fallback(self):
         raw = [
             {'pointIndex': -1, 'distanceInMeters': 0, 'travelTimeInSeconds': 0},
@@ -626,7 +622,6 @@ class CheckpointGenerationTests(SimpleTestCase):
         mid_dt = datetime.fromisoformat(mid_cp['eta'])
         self.assertAlmostEqual((mid_dt - dep_dt).total_seconds(), 3600, delta=120)
 
-    # --- ETA & TIMEZONE TESTS ---
     def test_eta_timezone_preservation(self):
         cps = generate_checkpoints(self.points, self.progress, self.total_m, self.total_s, '2026-11-03T08:00:00-06:00', 25)
         for cp in cps:
@@ -646,14 +641,12 @@ class CheckpointGenerationTests(SimpleTestCase):
         arr_unix = cps[-1]['eta_unix']
         self.assertEqual(arr_unix - dep_unix, 7200)
 
-    # --- SEGMENT DISTANCE TESTS ---
     def test_segment_distances_sum_equals_total(self):
         cps = generate_checkpoints(self.points, self.progress, self.total_m, self.total_s, self.dep_time, 25)
         self.assertEqual(cps[0]['segment_miles'], 0.0)
         sum_segments = sum(cp['segment_miles'] for cp in cps)
         self.assertAlmostEqual(sum_segments, 100.0, places=1)
 
-    # --- PHASE 4.5 EDGE-CASE AUDIT TESTS ---
     def test_edge_case_24_99_miles(self):
         cps = generate_checkpoints(self.points, [], 24.99 * 1609.344, 1800, self.dep_time, 25, total_miles=24.99)
         self.assertEqual(len(cps), 2)
@@ -780,7 +773,7 @@ class EndToEndRouteEndpointTests(SimpleTestCase):
         self.assertIn('weather', r['checkpoints'][0])
         self.assertEqual(r['checkpoints'][0]['weather']['status'], 'available')
 
-        # Credentials check: ensure key never appears in response
+        # The API key must never leak into the response
         self.assertNotIn('valid-test-key', str(data))
 
     @patch('requests.get')
@@ -871,26 +864,26 @@ class EndToEndRouteEndpointTests(SimpleTestCase):
         res = self.client.post(self.url, payload, content_type='application/json')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
 
-        # 1. Verify outbound TomTom parameter passed naive departure without converting to UTC
+        # outbound TomTom parameter passed naive departure without converting to UTC
         tomtom_call = [c for c in captured_calls if c[0] == 'tomtom'][0]
         params_list = tomtom_call[2]
         depart_at_param = dict(params_list).get('departAt')
         self.assertEqual(depart_at_param, '2026-11-03T08:00:00')
 
-        # 2. Verify normalized route departure is Chicago local time with offset -06:00
+        # normalized route departure is Chicago local time with offset -06:00
         route = res.json()['routes'][0]
         self.assertEqual(route['departure'], '2026-11-03T08:00:00-06:00')
 
-        # 3. Verify first checkpoint ETA preserves 08:00 Chicago local time
+        # first checkpoint ETA preserves 08:00 Chicago local time
         cp0 = route['checkpoints'][0]
         self.assertEqual(cp0['mile_marker'], 0.0)
         self.assertEqual(cp0['eta'], '2026-11-03T08:00:00-06:00')
 
-        # 4. Verify eta_unix represents 2026-11-03 14:00:00 UTC (1793714400)
+        # eta_unix represents 2026-11-03 14:00:00 UTC (1793714400)
         expected_unix = 1793714400  # 2026-11-03 14:00:00 UTC = 08:00:00-06:00
         self.assertEqual(cp0['eta_unix'], expected_unix)
 
-        # 5. Verify Open-Meteo matched exact forecast hour without offset distortion
+        # Open-Meteo matched exact forecast hour without offset distortion
         weather = cp0['weather']
         self.assertEqual(weather['status'], 'available')
         self.assertEqual(weather['forecast_time_unix'], expected_unix)
@@ -913,7 +906,7 @@ class MissingApiKeyTests(SimpleTestCase):
 
 
 class OpenMeteoWeatherTests(SimpleTestCase):
-    """Unit and integration tests for Open-Meteo weather integration."""
+    """Open-Meteo fetching, parsing and hour matching."""
 
     @patch('requests.get')
     def test_request_construction_and_params(self, mock_get):
@@ -1179,7 +1172,7 @@ class OpenMeteoWeatherTests(SimpleTestCase):
 
 
 class WindRiskClassificationTests(SimpleTestCase):
-    """Test wind risk classification across all boundary thresholds and cargo overrides."""
+    """Wind thresholds and load rules."""
 
     def test_wind_base_thresholds(self):
         # Below 25 mph: Low
@@ -1242,7 +1235,7 @@ class WindRiskClassificationTests(SimpleTestCase):
 
 
 class RainRiskClassificationTests(SimpleTestCase):
-    """Test rain risk classification across all boundary thresholds."""
+    """Rain thresholds."""
 
     def test_rain_boundaries(self):
         # Below 0.10: Low
@@ -1274,7 +1267,7 @@ class RainRiskClassificationTests(SimpleTestCase):
 
 
 class SnowRiskClassificationTests(SimpleTestCase):
-    """Test snowfall risk classification across all boundary thresholds."""
+    """Snowfall thresholds."""
 
     def test_snow_boundaries(self):
         # Below 0.5: Low
@@ -1305,7 +1298,7 @@ class SnowRiskClassificationTests(SimpleTestCase):
 
 
 class CheckpointRiskAssessmentTests(SimpleTestCase):
-    """Test checkpoint risk determination across factor combinations and missing weather."""
+    """Overall checkpoint risk and handling of missing weather."""
 
     def test_overall_risk_takes_worst_factor(self):
         # Wind Low, Rain Moderate, Snow Low -> Moderate
@@ -1361,12 +1354,12 @@ class CheckpointRiskAssessmentTests(SimpleTestCase):
         self.assertEqual(r_part['assessment_status'], 'partial')
         self.assertEqual(r_part['wind_level'], RISK_LOW)
         self.assertIsNone(r_part['snow_level'])
-        # Must NOT produce a falsely reassuring overall risk
+        # Missing data must not look safe
         self.assertIsNone(r_part['overall_level'])
 
 
 class RouteRiskAggregationTests(SimpleTestCase):
-    """Test route-level mileage aggregation, average risk, and segment accounting."""
+    """Miles per risk level and the distance-weighted average."""
 
     def test_unequal_segments_and_partial_segment(self):
         route = {
@@ -1537,8 +1530,8 @@ class RouteRiskAggregationTests(SimpleTestCase):
         self.assertEqual(res['low_miles'], 0.0)
         self.assertIsNone(res['average_risk'])
 
-    def test_adversarial_six_bucket_rounding_within_0_05_miles(self):
-        # Adversarial test case with 6 buckets of 10.04 miles each (total: 60.24 miles)
+    def test_six_bucket_rounding_stays_within_0_05_miles(self):
+        # Six buckets of 10.04 miles each (60.24 total)
         # With 1 decimal: each is 10.0 -> sum 60.0 (error 0.24 > 0.05!)
         # With 2 decimals: each is 10.04 -> sum 60.24 (error 0.00 <= 0.05!)
         route = {
@@ -1567,10 +1560,10 @@ class RouteRiskAggregationTests(SimpleTestCase):
             2
         )
         self.assertEqual(bucket_sum, 60.24)
-        # Strict verification: discrepancy must be <= 0.05 miles
+        # Rounded buckets should stay within 0.05 miles of the total
         self.assertLessEqual(abs(bucket_sum - 60.24), 0.05)
 
-    def test_adversarial_uneven_rounding_different_directions_within_0_05_miles(self):
+    def test_uneven_rounding_in_both_directions_stays_within_0_05_miles(self):
         # 5 categories with 3-decimal segment values rounding in opposite directions
         route = {
             'distance_miles': 60.024,
@@ -1669,7 +1662,7 @@ class RouteRiskAggregationTests(SimpleTestCase):
 
 
 class RouteRecommendationRankingTests(SimpleTestCase):
-    """Test recommendation ranking hierarchy, tie-breakers, and failure conditions."""
+    """Ranking order, tie-breakers and the no-recommendation cases."""
 
     def test_priority_1_fewest_severe_miles(self):
         # Route 1 has 5 Severe miles, Route 2 has 0 Severe miles (even with more High miles)
@@ -1734,7 +1727,7 @@ class RouteRecommendationRankingTests(SimpleTestCase):
         self.assertEqual(rec['recommended_route_id'], 2)
         self.assertEqual(rec['message'], "Both routes have equal weather-risk assessments. Route 2 is recommended because it has the shortest estimated travel time.")
 
-    def test_priority_5_provider_ordering_deterministic_tie_breaker(self):
+    def test_priority_5_provider_order_breaks_remaining_ties(self):
         r1 = {
             'id': 1,
             'duration_seconds': 4000,
@@ -1820,24 +1813,24 @@ class RouteRecommendationRankingTests(SimpleTestCase):
             'risk_summary': {'is_fully_assessed': False, 'unassessed_miles': 30.0, 'no_travel_miles': 0.0, 'severe_miles': 0.0, 'high_miles': 0.0, 'average_risk': None},
         }
         rec = evaluate_route_recommendations([r1, r2, r3])
-        # 1. Route 1 selected using approved ranking priority (fewest High miles: 2.0 vs 10.0)
+        # Route 1 selected using approved ranking priority (fewest High miles: 2.0 vs 10.0)
         self.assertEqual(rec['recommended_route_id'], 1)
-        # 2. status must be recommended
+        # status must be recommended
         self.assertEqual(rec['status'], 'recommended')
-        # 3. is_weather_complete must be false
+        # is_weather_complete must be false
         self.assertFalse(rec['is_weather_complete'])
-        # 4. all_routes_unsafe must be false
+        # all_routes_unsafe must be false
         self.assertFalse(rec['all_routes_unsafe'])
-        # 5. Route recommendations correctly assigned
+        # Route recommendations correctly assigned
         self.assertTrue(r1['is_recommended'])
         self.assertFalse(r2['is_recommended'])
         self.assertFalse(r3['is_recommended'])
-        # 6. Message explains why winner was selected and discloses Route 3 incomplete weather
+        # Message explains why winner was selected and discloses Route 3 incomplete weather
         self.assertEqual(
             rec['message'],
             "Route 1 is recommended because it has the fewest high-risk miles. Note: Route 3 could not be fully assessed due to missing weather data."
         )
-        # 7. Must NOT say winner is the "only fully assessed safe route"
+        # Should not claim it is the "only fully assessed safe route"
         self.assertNotIn("only fully assessed", rec['message'])
 
     def test_unsafe_route_plus_incomplete_alternative_returns_incomplete_weather(self):
@@ -1944,7 +1937,7 @@ class RouteRecommendationRankingTests(SimpleTestCase):
 
 @override_settings(TOMTOM_API_KEY='valid-test-key')
 class RiskApiIntegrationTests(SimpleTestCase):
-    """Test API response payload structure with risk scoring and recommendation fields."""
+    """Risk and recommendation fields in the API response."""
 
     @patch('requests.get')
     def test_api_returns_recommendation_and_risk_summary(self, mock_get):
@@ -1974,7 +1967,7 @@ class RiskApiIntegrationTests(SimpleTestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         data = res.json()
 
-        # 1. Root level recommendation object
+        # Root level recommendation object
         self.assertIn('recommendation', data)
         rec = data['recommendation']
         self.assertIn('recommended_route_id', rec)
@@ -1982,7 +1975,7 @@ class RiskApiIntegrationTests(SimpleTestCase):
         self.assertEqual(rec['status'], 'recommended')
         self.assertIn('message', rec)
 
-        # 2. Route level risk_summary and is_recommended
+        # Route level risk_summary and is_recommended
         route = data['routes'][0]
         self.assertIn('risk_summary', route)
         rs = route['risk_summary']
@@ -1997,7 +1990,7 @@ class RiskApiIntegrationTests(SimpleTestCase):
         self.assertIn('has_no_travel', rs)
         self.assertTrue(route['is_recommended'])
 
-        # 3. Checkpoint level risk object
+        # Checkpoint level risk object
         cp0 = route['checkpoints'][0]
         self.assertIn('risk', cp0)
         cpr = cp0['risk']
@@ -2008,3 +2001,104 @@ class RiskApiIntegrationTests(SimpleTestCase):
         self.assertIn('overall_level', cpr)
 
 
+
+
+def make_wind_route(route_id, duration_s, winds):
+    """A route with one 25-mile checkpoint per wind reading and no rain or snow."""
+    checkpoints = [
+        {
+            'id': i,
+            'mile_marker': i * 25.0,
+            'segment_miles': 25.0,
+            'weather': {'status': 'available', 'wind_speed_mph': wind, 'rain_in': 0.0, 'snowfall_in': 0.0},
+        }
+        for i, wind in enumerate(winds, start=1)
+    ]
+    return {
+        'id': route_id,
+        'distance_miles': len(winds) * 25.0,
+        'duration_seconds': duration_s,
+        'checkpoints': checkpoints,
+    }
+
+
+class DepartureShiftTests(SimpleTestCase):
+    """What the forecast slider relies on: a later departure moves every ETA and lookup."""
+
+    def test_later_departure_shifts_every_eta(self):
+        geometry = [
+            {'latitude': 41.8781, 'longitude': -87.6298},
+            {'latitude': 41.5000, 'longitude': -89.0000},
+            {'latitude': 41.0000, 'longitude': -91.0000},
+        ]
+        markers = [
+            {'distance_meters': 0, 'travel_time_seconds': 0, 'point_index': 0},
+            {'distance_meters': 80467, 'travel_time_seconds': 3600, 'point_index': 1},
+            {'distance_meters': 160934, 'travel_time_seconds': 7200, 'point_index': 2},
+        ]
+        args = (geometry, markers, 160934, 7200)
+
+        morning = generate_checkpoints(*args, '2026-11-04T08:00:00', 25, 100.0)
+        evening = generate_checkpoints(*args, '2026-11-04T20:00:00', 25, 100.0)
+
+        self.assertEqual(len(morning), len(evening))
+        self.assertGreaterEqual(len(morning), 4)
+        for a, b in zip(morning, evening):
+            shift = datetime.fromisoformat(b['eta']) - datetime.fromisoformat(a['eta'])
+            self.assertEqual(shift, timedelta(hours=12))
+
+    def test_shifted_eta_picks_matching_forecast_hour(self):
+        base = int(datetime(2026, 11, 4, tzinfo=timezone.utc).timestamp())
+        hourly = parse_weather_hourly({
+            'hourly': {
+                'time': [base + h * 3600 for h in range(48)],
+                'wind_speed_10m': [10.0 + h for h in range(48)],
+                'rain': [0.0] * 48,
+                'snowfall': [0.0] * 48,
+            }
+        })
+
+        for hour in (8, 20, 32):
+            weather = match_checkpoint_weather(base + hour * 3600, hourly)
+            self.assertEqual(weather['status'], 'available')
+            self.assertEqual(weather['wind_speed_mph'], 10.0 + hour)
+
+    def test_recommendation_follows_the_weather(self):
+        load = 35000
+
+        _, rec = process_route_risks([
+            make_wind_route(1, 14 * 3600, [15.0, 15.0, 15.0, 15.0]),
+            make_wind_route(2, 16 * 3600, [15.0, 40.0, 15.0, 15.0]),
+        ], load)
+        self.assertEqual(rec['recommended_route_id'], 1)
+
+        # Twelve hours later the wind has moved onto route 1.
+        later_routes, rec = process_route_risks([
+            make_wind_route(1, 14 * 3600, [15.0, 40.0, 40.0, 15.0]),
+            make_wind_route(2, 16 * 3600, [15.0, 15.0, 15.0, 15.0]),
+        ], load)
+        self.assertEqual(rec['recommended_route_id'], 2)
+        self.assertFalse(later_routes[0]['is_recommended'])
+        self.assertTrue(later_routes[1]['is_recommended'])
+
+    def test_segment_miles_add_up_to_route_distance(self):
+        geometry = [
+            {'latitude': 41.8781 + i * 0.01, 'longitude': -87.6298 + i * 0.01}
+            for i in range(100)
+        ]
+        total_miles = round(100000.0 / 1609.344, 1)
+
+        checkpoints = generate_checkpoints(
+            geometry=geometry,
+            progress_markers=[],
+            total_distance_m=100000.0,
+            total_time_s=3600,
+            departure_str='2026-11-04T08:00:00',
+            interval_miles=25,
+            total_miles=total_miles,
+        )
+
+        segment_total = sum(cp['segment_miles'] for cp in checkpoints)
+        self.assertAlmostEqual(segment_total, total_miles, delta=0.05)
+        # The last segment is shorter than the interval, not padded out.
+        self.assertNotEqual(segment_total, len(checkpoints) * 25.0)

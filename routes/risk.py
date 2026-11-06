@@ -1,15 +1,7 @@
-"""
-Weather risk classification and route recommendation engine.
+"""Weather risk classification and route recommendation."""
 
-Implements the 5-tier environmental hazard scale:
-Low < Moderate < High < Severe < No Travel
-Applies cargo weight overrides to wind risk, calculates checkpoint risk,
-aggregates route risk distances, and determines the safest recommended route.
-"""
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from typing import Optional, Dict, Any, List, Tuple
-
-# Exact 5 risk categories (ordered by severity)
 RISK_LOW = 'Low'
 RISK_MODERATE = 'Moderate'
 RISK_HIGH = 'High'
@@ -26,7 +18,8 @@ RISK_SEVERITY = {
     RISK_NO_TRAVEL: 5,
 }
 
-# Distance-weighted average risk weights (No Travel is excluded)
+# Weights for the distance-weighted average. No Travel has no weight because
+# a route with any No Travel miles never gets an average.
 RISK_WEIGHTS = {
     RISK_LOW: 1,
     RISK_MODERATE: 2,
@@ -34,273 +27,170 @@ RISK_WEIGHTS = {
     RISK_SEVERE: 4,
 }
 
-# Recommendation status codes
 REC_STATUS_RECOMMENDED = 'recommended'
 REC_STATUS_NO_SAFE_ROUTE = 'no_safe_route'
 REC_STATUS_INCOMPLETE_WEATHER = 'incomplete_weather'
 
-# Standard message strings
 MSG_NO_SAFE_ROUTE = 'No safe route available under current weather conditions.'
 MSG_INCOMPLETE_WEATHER = 'Route safety could not be fully assessed because weather data is missing.'
 
+HEAVY_LOAD_LB = 30000
+VERY_HEAVY_LOAD_LB = 40000
+
 
 def classify_wind_risk(wind_mph: float, load_weight_lb: float = 0.0) -> str:
-    """
-    Classify wind hazard with continuous ranges and apply cargo-weight overrides.
-
-    Base Thresholds:
-    - Below 25 mph: Low
-    - 25 to less than 35 mph: Moderate
-    - 35 to less than 45 mph: High
-    - 45 to less than 55 mph: Severe
-    - 55 mph or above: No Travel
-
-    Cargo Weight Overrides (applied after base classification):
-    1. Wind >= 55 mph: No Travel, regardless of cargo load.
-    2. Wind >= 45 and < 55 mph AND cargo load > 30,000 lb: No Travel.
-    3. Wind >= 35 and < 45 mph AND cargo load > 40,000 lb: Severe.
-    """
-    # 1. Base classification
+    """Classify wind speed, applying the load rules for heavy trucks."""
     if wind_mph < 25.0:
-        base_level = RISK_LOW
-    elif wind_mph < 35.0:
-        base_level = RISK_MODERATE
-    elif wind_mph < 45.0:
-        base_level = RISK_HIGH
-    elif wind_mph < 55.0:
-        base_level = RISK_SEVERE
-    else:
-        base_level = RISK_NO_TRAVEL
-
-    # 2. Cargo-weight wind overrides
-    if wind_mph >= 55.0:
-        return RISK_NO_TRAVEL
-    if wind_mph >= 45.0 and load_weight_lb > 30000:
-        return RISK_NO_TRAVEL
-    if wind_mph >= 35.0 and load_weight_lb > 40000:
-        return RISK_SEVERE
-
-    return base_level
+        return RISK_LOW
+    if wind_mph < 35.0:
+        return RISK_MODERATE
+    if wind_mph < 45.0:
+        return RISK_SEVERE if load_weight_lb > VERY_HEAVY_LOAD_LB else RISK_HIGH
+    if wind_mph < 55.0:
+        return RISK_NO_TRAVEL if load_weight_lb > HEAVY_LOAD_LB else RISK_SEVERE
+    return RISK_NO_TRAVEL
 
 
 def classify_rain_risk(rain_in: float) -> str:
-    """
-    Classify rain hazard in inches per hour.
-
-    Thresholds:
-    - Below 0.10: Low
-    - 0.10 through 0.25 inclusive: Moderate
-    - Above 0.25 through 0.50 inclusive: High
-    - Above 0.50 through 1.00 inclusive: Severe
-    - Above 1.00: No Travel
-    """
+    """Classify rainfall in inches per hour."""
     if rain_in < 0.10:
         return RISK_LOW
-    elif rain_in <= 0.25:
+    if rain_in <= 0.25:
         return RISK_MODERATE
-    elif rain_in <= 0.50:
+    if rain_in <= 0.50:
         return RISK_HIGH
-    elif rain_in <= 1.00:
+    if rain_in <= 1.00:
         return RISK_SEVERE
-    else:
-        return RISK_NO_TRAVEL
+    return RISK_NO_TRAVEL
 
 
 def classify_snow_risk(snowfall_in: float) -> str:
-    """
-    Classify snowfall hazard in inches per hour.
-
-    Thresholds:
-    - Below 0.5: Low
-    - 0.5 through 1.0 inclusive: Moderate
-    - Above 1.0 through 2.0 inclusive: High
-    - Above 2.0 through 3.0 inclusive: Severe
-    - Above 3.0: No Travel
-    """
+    """Classify snowfall in inches per hour."""
     if snowfall_in < 0.5:
         return RISK_LOW
-    elif snowfall_in <= 1.0:
+    if snowfall_in <= 1.0:
         return RISK_MODERATE
-    elif snowfall_in <= 2.0:
+    if snowfall_in <= 2.0:
         return RISK_HIGH
-    elif snowfall_in <= 3.0:
+    if snowfall_in <= 3.0:
         return RISK_SEVERE
-    else:
-        return RISK_NO_TRAVEL
+    return RISK_NO_TRAVEL
+
+
+def _empty_assessment(status: str) -> Dict[str, Any]:
+    return {
+        'assessment_status': status,
+        'wind_level': None,
+        'rain_level': None,
+        'snow_level': None,
+        'overall_level': None,
+    }
+
+
+def _classify_or_none(value: Any, classify: Callable[..., str], *args: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return classify(float(value), *args)
+    except (TypeError, ValueError):
+        return None
 
 
 def assess_checkpoint_risk(weather: Optional[Dict[str, Any]], load_weight_lb: float = 0.0) -> Dict[str, Any]:
-    """
-    Assess checkpoint risk factors (wind with load overrides, rain, snow) and
-    determine overall checkpoint risk level.
-
-    Handles complete ('available'), incomplete ('partial'), and missing ('unavailable') weather.
-    Incomplete weather never produces a falsely reassuring overall risk.
-    """
+    """Classify each hazard at a checkpoint and take the worst as the overall level."""
     if not weather or not isinstance(weather, dict):
-        return {
-            'assessment_status': 'unavailable',
-            'wind_level': None,
-            'rain_level': None,
-            'snow_level': None,
-            'overall_level': None,
-        }
+        return _empty_assessment('unavailable')
 
     status = weather.get('status')
     wind = weather.get('wind_speed_mph')
     rain = weather.get('rain_in')
     snow = weather.get('snowfall_in')
 
-    if status == 'available' and wind is not None and rain is not None and snow is not None:
+    if status == 'available' and None not in (wind, rain, snow):
         try:
-            wind_val = float(wind)
-            rain_val = float(rain)
-            snow_val = float(snow)
+            wind_val, rain_val, snow_val = float(wind), float(rain), float(snow)
         except (TypeError, ValueError):
-            return {
-                'assessment_status': 'partial',
-                'wind_level': None,
-                'rain_level': None,
-                'snow_level': None,
-                'overall_level': None,
-            }
+            return _empty_assessment('partial')
 
-        wind_level = classify_wind_risk(wind_val, load_weight_lb)
-        rain_level = classify_rain_risk(rain_val)
-        snow_level = classify_snow_risk(snow_val)
-
-        overall_level = max(
-            [wind_level, rain_level, snow_level],
-            key=lambda lvl: RISK_SEVERITY[lvl],
-        )
-
+        levels = {
+            'wind_level': classify_wind_risk(wind_val, load_weight_lb),
+            'rain_level': classify_rain_risk(rain_val),
+            'snow_level': classify_snow_risk(snow_val),
+        }
         return {
             'assessment_status': 'assessed',
-            'wind_level': wind_level,
-            'rain_level': rain_level,
-            'snow_level': snow_level,
-            'overall_level': overall_level,
+            **levels,
+            'overall_level': max(levels.values(), key=RISK_SEVERITY.get),
         }
 
-    elif status == 'partial':
-        wind_level = None
-        if wind is not None:
-            try:
-                wind_level = classify_wind_risk(float(wind), load_weight_lb)
-            except (TypeError, ValueError):
-                pass
-
-        rain_level = None
-        if rain is not None:
-            try:
-                rain_level = classify_rain_risk(float(rain))
-            except (TypeError, ValueError):
-                pass
-
-        snow_level = None
-        if snow is not None:
-            try:
-                snow_level = classify_snow_risk(float(snow))
-            except (TypeError, ValueError):
-                pass
-
-        # Partial assessment MUST NOT assign a reassuring overall risk
+    if status == 'partial':
+        # Report what we can, but never give an overall level from incomplete
+        # data: a missing value could be the dangerous one.
         return {
             'assessment_status': 'partial',
-            'wind_level': wind_level,
-            'rain_level': rain_level,
-            'snow_level': snow_level,
+            'wind_level': _classify_or_none(wind, classify_wind_risk, load_weight_lb),
+            'rain_level': _classify_or_none(rain, classify_rain_risk),
+            'snow_level': _classify_or_none(snow, classify_snow_risk),
             'overall_level': None,
         }
 
-    else:
-        return {
-            'assessment_status': 'unavailable',
-            'wind_level': None,
-            'rain_level': None,
-            'snow_level': None,
-            'overall_level': None,
-        }
+    return _empty_assessment('unavailable')
 
 
 def aggregate_route_risk(route: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Aggregate actual segment distances across risk categories:
-    low_miles, moderate_miles, high_miles, severe_miles, no_travel_miles, unassessed_miles.
-    Computes distance-weighted average risk for fully assessed safe routes.
-    """
-    low_miles = 0.0
-    moderate_miles = 0.0
-    high_miles = 0.0
-    severe_miles = 0.0
-    no_travel_miles = 0.0
+    """Sum route miles per risk level and compute the distance-weighted average."""
+    miles = {level: 0.0 for level in RISK_LEVELS}
     unassessed_miles = 0.0
 
-    checkpoints = route.get('checkpoints', [])
-    for cp in checkpoints:
-        seg_miles = float(cp.get('segment_miles', 0.0))
+    for cp in route.get('checkpoints', []):
+        segment_miles = float(cp.get('segment_miles', 0.0))
         risk = cp.get('risk', {})
-        status = risk.get('assessment_status')
         overall = risk.get('overall_level')
 
-        if status == 'assessed' and overall in RISK_SEVERITY:
-            if overall == RISK_LOW:
-                low_miles += seg_miles
-            elif overall == RISK_MODERATE:
-                moderate_miles += seg_miles
-            elif overall == RISK_HIGH:
-                high_miles += seg_miles
-            elif overall == RISK_SEVERE:
-                severe_miles += seg_miles
-            elif overall == RISK_NO_TRAVEL:
-                no_travel_miles += seg_miles
+        if risk.get('assessment_status') == 'assessed' and overall in RISK_SEVERITY:
+            miles[overall] += segment_miles
         else:
-            unassessed_miles += seg_miles
+            unassessed_miles += segment_miles
 
-    total_route_miles = float(route.get('distance_miles', 0.0))
-    sum_miles = low_miles + moderate_miles + high_miles + severe_miles + no_travel_miles + unassessed_miles
-    if total_route_miles <= 0.0:
-        total_route_miles = sum_miles
+    total_miles = float(route.get('distance_miles', 0.0))
+    if total_miles <= 0.0:
+        total_miles = sum(miles.values()) + unassessed_miles
 
-    # Raw safety states evaluated before display rounding to prevent sub-precision leakage
-    is_fully_assessed = (unassessed_miles == 0.0)
-    has_no_travel = (no_travel_miles > 0.0)
+    # Decide safety from the raw values, before rounding for display,
+    # so a tiny No Travel stretch can't round away to 0.00.
+    is_fully_assessed = unassessed_miles == 0.0
+    has_no_travel = miles[RISK_NO_TRAVEL] > 0.0
 
-    # Normalize floating-point representation to 2 decimal places for display
-    # Guarantees maximum rounding divergence <= 0.03 miles across 6 categories (strictly <= 0.05 miles)
-    r_low = round(low_miles, 2)
-    r_mod = round(moderate_miles, 2)
-    r_high = round(high_miles, 2)
-    r_sev = round(severe_miles, 2)
-    r_notrav = round(no_travel_miles, 2)
-    r_unass = round(unassessed_miles, 2)
-
-    target_total = round(total_route_miles, 2)
-
-    # Average risk calculation: retain unrounded values during calculation
-    # Only defined for fully assessed routes with zero No Travel miles
-    if is_fully_assessed and not has_no_travel and target_total > 0.0:
-        weighted_sum = (
-            low_miles * RISK_WEIGHTS[RISK_LOW]
-            + moderate_miles * RISK_WEIGHTS[RISK_MODERATE]
-            + high_miles * RISK_WEIGHTS[RISK_HIGH]
-            + severe_miles * RISK_WEIGHTS[RISK_SEVERE]
-        )
-        average_risk = round(weighted_sum / total_route_miles, 2)
-    else:
-        average_risk = None
+    average_risk = None
+    if is_fully_assessed and not has_no_travel and round(total_miles, 2) > 0.0:
+        weighted_sum = sum(miles[level] * weight for level, weight in RISK_WEIGHTS.items())
+        average_risk = round(weighted_sum / total_miles, 2)
 
     return {
-        'low_miles': r_low,
-        'moderate_miles': r_mod,
-        'high_miles': r_high,
-        'severe_miles': r_sev,
-        'no_travel_miles': r_notrav,
-        'unassessed_miles': r_unass,
+        'low_miles': round(miles[RISK_LOW], 2),
+        'moderate_miles': round(miles[RISK_MODERATE], 2),
+        'high_miles': round(miles[RISK_HIGH], 2),
+        'severe_miles': round(miles[RISK_SEVERE], 2),
+        'no_travel_miles': round(miles[RISK_NO_TRAVEL], 2),
+        'unassessed_miles': round(unassessed_miles, 2),
         'average_risk': average_risk,
         'is_fully_assessed': is_fully_assessed,
         'has_no_travel': has_no_travel,
     }
+
+
+def _route_id(route: Dict[str, Any], index: int) -> int:
+    return route['id'] if route.get('id') is not None else index + 1
+
+
+def _group_label(count: int, eligible_only: bool) -> str:
+    """Wording like "Both routes" or "All three eligible routes"."""
+    noun = 'eligible routes' if eligible_only else 'routes'
+    if count == 2:
+        return f'Both {noun}'
+    if count == 3:
+        return f'All three {noun}'
+    return f'All {count} {noun}'
 
 
 def generate_recommendation_message(
@@ -309,43 +199,34 @@ def generate_recommendation_message(
     all_routes: List[Dict[str, Any]],
     is_weather_complete: bool,
 ) -> str:
-    """
-    Generate dynamic, factual recommendation rationale accurately identifying
-    the ranking criterion or tie-breaker that selected the winning route.
-    """
+    """Explain which ranking rule picked the recommended route."""
     best_id = best_route.get('id') if best_route.get('id') is not None else 1
     best_rs = best_route.get('risk_summary', {})
+    eligible_only = len(eligible_routes) != len(all_routes)
 
     if len(eligible_routes) == 1:
         if len(all_routes) == 1:
-            base_msg = f"Route {best_id} is recommended as the safest route under current weather conditions."
+            message = f"Route {best_id} is recommended as the safest route under current weather conditions."
         else:
-            base_msg = f"Route {best_id} is recommended as the only fully assessed safe route available."
+            message = f"Route {best_id} is recommended as the only fully assessed safe route available."
     else:
-        # Compare best_route against the runner-up (the second-ranked eligible route)
+        # The winner only needs to beat the runner-up, so explain the first
+        # rule where the two differ.
         runner_up = eligible_routes[1][1]
         runner_rs = runner_up.get('risk_summary', {})
 
         best_severe = best_rs.get('severe_miles', 0.0)
-        runner_severe = runner_rs.get('severe_miles', 0.0)
         best_high = best_rs.get('high_miles', 0.0)
-        runner_high = runner_rs.get('high_miles', 0.0)
         best_avg = best_rs.get('average_risk')
         runner_avg = runner_rs.get('average_risk')
-        best_dur = best_route.get('duration_seconds', 0)
-        runner_dur = runner_up.get('duration_seconds', 0)
 
-        # 1. Fewest Severe miles
-        if best_severe < runner_severe:
-            base_msg = f"Route {best_id} is recommended because it has the fewest severe-risk miles."
-        # 2. Fewest High miles
-        elif best_high < runner_high:
-            base_msg = f"Route {best_id} is recommended because it has the fewest high-risk miles."
-        # 3. Lowest average risk
+        if best_severe < runner_rs.get('severe_miles', 0.0):
+            message = f"Route {best_id} is recommended because it has the fewest severe-risk miles."
+        elif best_high < runner_rs.get('high_miles', 0.0):
+            message = f"Route {best_id} is recommended because it has the fewest high-risk miles."
         elif best_avg is not None and runner_avg is not None and best_avg < runner_avg:
-            base_msg = f"Route {best_id} is recommended because it has the lowest average weather risk."
-        # 4. Shortest travel time (weather risk metrics are equal between best and runner up)
-        elif best_dur < runner_dur:
+            message = f"Route {best_id} is recommended because it has the lowest average weather risk."
+        elif best_route.get('duration_seconds', 0) < runner_up.get('duration_seconds', 0):
             all_equal_weather = all(
                 r.get('risk_summary', {}).get('severe_miles', 0.0) == best_severe
                 and r.get('risk_summary', {}).get('high_miles', 0.0) == best_high
@@ -353,35 +234,30 @@ def generate_recommendation_message(
                 for _, r in eligible_routes
             )
             if all_equal_weather:
-                if len(eligible_routes) == len(all_routes):
-                    if len(all_routes) == 2:
-                        prefix = "Both routes"
-                    elif len(all_routes) == 3:
-                        prefix = "All three routes"
-                    else:
-                        prefix = f"All {len(all_routes)} routes"
-                else:
-                    if len(eligible_routes) == 2:
-                        prefix = "Both eligible routes"
-                    elif len(eligible_routes) == 3:
-                        prefix = "All three eligible routes"
-                    else:
-                        prefix = f"All {len(eligible_routes)} eligible routes"
-                base_msg = f"{prefix} have equal weather-risk assessments. Route {best_id} is recommended because it has the shortest estimated travel time."
+                count = len(eligible_routes) if eligible_only else len(all_routes)
+                label = _group_label(count, eligible_only)
+                message = (
+                    f"{label} have equal weather-risk assessments. "
+                    f"Route {best_id} is recommended because it has the shortest estimated travel time."
+                )
             else:
-                base_msg = f"Route {best_id} is recommended because it has the shortest estimated travel time among routes with lowest weather risk."
-        # 5. Deterministic provider order tie-break
+                message = (
+                    f"Route {best_id} is recommended because it has the shortest estimated "
+                    "travel time among routes with lowest weather risk."
+                )
         else:
-            if len(eligible_routes) == len(all_routes):
-                prefix = "Both routes" if len(all_routes) == 2 else f"All {len(all_routes)} routes"
+            if not eligible_only:
+                label = 'Both routes' if len(all_routes) == 2 else f'All {len(all_routes)} routes'
             else:
-                prefix = f"All {len(eligible_routes)} eligible routes"
-            base_msg = f"{prefix} have equal weather-risk assessments and travel times. Route {best_id} is recommended based on provider route ordering."
+                label = f'All {len(eligible_routes)} eligible routes'
+            message = (
+                f"{label} have equal weather-risk assessments and travel times. "
+                f"Route {best_id} is recommended based on provider route ordering."
+            )
 
-    # Communicate incomplete weather coverage for alternative routes when present
     if not is_weather_complete:
         unassessed_ids = [
-            str(r.get('id') if r.get('id') is not None else (idx + 1))
+            str(_route_id(r, idx))
             for idx, r in enumerate(all_routes)
             if not r.get('risk_summary', {}).get('is_fully_assessed', False)
         ]
@@ -391,25 +267,38 @@ def generate_recommendation_message(
             route_ref = f"Route {unassessed_ids[0]} and Route {unassessed_ids[1]}"
         else:
             route_ref = "Some alternative routes"
-        base_msg += f" Note: {route_ref} could not be fully assessed due to missing weather data."
+        message += f" Note: {route_ref} could not be fully assessed due to missing weather data."
 
-    return base_msg
+    return message
+
+
+def _is_eligible(route: Dict[str, Any]) -> bool:
+    """A route can be recommended only if it is fully assessed and has no No Travel miles."""
+    rs = route.get('risk_summary', {})
+    no_travel_miles = rs.get('no_travel_miles', 0.0)
+    has_no_travel = rs.get('has_no_travel', no_travel_miles > 0.0)
+    return rs.get('is_fully_assessed', False) and not has_no_travel and no_travel_miles == 0.0
+
+
+def _ranking_key(item: Tuple[int, Dict[str, Any]]) -> tuple:
+    index, route = item
+    rs = route['risk_summary']
+    average_risk = rs['average_risk'] if rs['average_risk'] is not None else 999.0
+    return (
+        rs['severe_miles'],
+        rs['high_miles'],
+        average_risk,
+        route.get('duration_seconds', 0),
+        index,  # keep the provider's order as the final tie-breaker
+    )
 
 
 def evaluate_route_recommendations(routes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Evaluate and rank route alternatives to determine safest recommended route.
+    Pick the safest route.
 
-    Eligibility:
-    1. Fully assessed (unassessed_miles == 0)
-    2. Free of No Travel miles (no_travel_miles == 0)
-
-    Ranking Hierarchy among eligible routes:
-    1. Fewest Severe miles
-    2. Fewest High miles
-    3. Lowest distance-weighted average risk
-    4. Shortest travel time (duration_seconds)
-    5. Provider route ordering (deterministic final tie-breaker)
+    Ranking: fewest Severe miles, fewest High miles, lowest average risk,
+    shortest travel time, then the provider's order.
     """
     if not routes:
         return {
@@ -420,69 +309,26 @@ def evaluate_route_recommendations(routes: List[Dict[str, Any]]) -> Dict[str, An
             'is_weather_complete': True,
         }
 
-    all_weather_complete = all(
+    weather_complete = all(
         r.get('risk_summary', {}).get('is_fully_assessed', False) for r in routes
     )
+    eligible_routes = sorted(
+        ((idx, r) for idx, r in enumerate(routes) if _is_eligible(r)),
+        key=_ranking_key,
+    )
 
-    eligible_routes = []
-    for idx, r in enumerate(routes):
-        rs = r.get('risk_summary', {})
-        # Route is eligible only if fully assessed and free of any No Travel mileage (raw precision)
-        is_assessed = rs.get('is_fully_assessed', False)
-        has_nt = rs.get('has_no_travel', rs.get('no_travel_miles', 0.0) > 0.0)
-        if is_assessed and not has_nt and rs.get('no_travel_miles', 0.0) == 0.0:
-            eligible_routes.append((idx, r))
+    if not eligible_routes:
+        for r in routes:
+            r['is_recommended'] = False
 
-    if eligible_routes:
-        # Sort by specified hierarchy
-        eligible_routes.sort(
-            key=lambda item: (
-                item[1]['risk_summary']['severe_miles'],
-                item[1]['risk_summary']['high_miles'],
-                item[1]['risk_summary']['average_risk'] if item[1]['risk_summary']['average_risk'] is not None else 999.0,
-                item[1].get('duration_seconds', 0),
-                item[0],  # provider route index
-            )
-        )
-
-        best_idx, best_route = eligible_routes[0]
-        best_id = best_route.get('id') if best_route.get('id') is not None else (best_idx + 1)
-
-        # Mark routes with recommendation flag
-        for idx, r in enumerate(routes):
-            r_id = r.get('id') if r.get('id') is not None else (idx + 1)
-            r['is_recommended'] = (r_id == best_id)
-
-        msg = generate_recommendation_message(
-            best_route=best_route,
-            eligible_routes=eligible_routes,
-            all_routes=routes,
-            is_weather_complete=all_weather_complete,
-        )
-
-        return {
-            'recommended_route_id': best_id,
-            'status': REC_STATUS_RECOMMENDED,
-            'message': msg,
-            'all_routes_unsafe': False,
-            'is_weather_complete': all_weather_complete,
-        }
-
-    # No eligible routes available
-    for r in routes:
-        r['is_recommended'] = False
-
-    if all_weather_complete:
-        # Every route is fully assessed and contains No Travel miles (Case C)
-        return {
-            'recommended_route_id': None,
-            'status': REC_STATUS_NO_SAFE_ROUTE,
-            'message': MSG_NO_SAFE_ROUTE,
-            'all_routes_unsafe': True,
-            'is_weather_complete': True,
-        }
-    else:
-        # Incomplete weather data prevents full assessment (Case B & Case D)
+        if weather_complete:
+            return {
+                'recommended_route_id': None,
+                'status': REC_STATUS_NO_SAFE_ROUTE,
+                'message': MSG_NO_SAFE_ROUTE,
+                'all_routes_unsafe': True,
+                'is_weather_complete': True,
+            }
         return {
             'recommended_route_id': None,
             'status': REC_STATUS_INCOMPLETE_WEATHER,
@@ -491,21 +337,32 @@ def evaluate_route_recommendations(routes: List[Dict[str, Any]]) -> Dict[str, An
             'is_weather_complete': False,
         }
 
+    best_idx, best_route = eligible_routes[0]
+    best_id = _route_id(best_route, best_idx)
+    for idx, r in enumerate(routes):
+        r['is_recommended'] = _route_id(r, idx) == best_id
 
-def process_route_risks(routes: List[Dict[str, Any]], load_weight_lb: float = 0.0) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Process checkpoint risk scoring, distance aggregation, and route recommendations
-    across a set of route alternatives.
-    """
+    return {
+        'recommended_route_id': best_id,
+        'status': REC_STATUS_RECOMMENDED,
+        'message': generate_recommendation_message(
+            best_route=best_route,
+            eligible_routes=eligible_routes,
+            all_routes=routes,
+            is_weather_complete=weather_complete,
+        ),
+        'all_routes_unsafe': False,
+        'is_weather_complete': weather_complete,
+    }
+
+
+def process_route_risks(
+    routes: List[Dict[str, Any]], load_weight_lb: float = 0.0
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Score every checkpoint, summarize each route and pick a recommendation."""
     for route in routes:
-        # 1. Assess each checkpoint's risk
         for cp in route.get('checkpoints', []):
             cp['risk'] = assess_checkpoint_risk(cp.get('weather'), load_weight_lb)
-
-        # 2. Aggregate route-level risk miles
         route['risk_summary'] = aggregate_route_risk(route)
 
-    # 3. Evaluate route recommendations
-    recommendation = evaluate_route_recommendations(routes)
-
-    return routes, recommendation
+    return routes, evaluate_route_recommendations(routes)

@@ -1,123 +1,111 @@
 from datetime import datetime, timezone
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from rest_framework import status
-from .services import get_route_alternatives, RouteServiceError
+
+from .services import RouteServiceError, get_route_alternatives
+
+ALLOWED_INTERVALS = (10, 25, 50)
+DEFAULT_INTERVAL = 25
 
 
 @api_view(['GET'])
 def api_root(request):
-    """Service status page shown at the backend root URL."""
-    return Response(
-        {
-            'service': 'Weather-Aware Truck Routing API',
-            'status': 'running',
-            'message': 'Backend is running successfully.',
-            'server_time_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-            'endpoints': {
-                'health': {'method': 'GET', 'path': '/api/health/'},
-                'routes': {'method': 'POST', 'path': '/api/routes/'},
-            },
+    """Simple status page so the deployment can be checked in a browser."""
+    return Response({
+        'service': 'Weather-Aware Truck Routing API',
+        'status': 'running',
+        'message': 'Backend is running successfully.',
+        'server_time_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+        'endpoints': {
+            'health': {'method': 'GET', 'path': '/api/health/'},
+            'routes': {'method': 'POST', 'path': '/api/routes/'},
         },
-        status=status.HTTP_200_OK,
-    )
+    })
 
 
 @api_view(['GET'])
 def health_check(request):
-    return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+    return Response({'status': 'ok'})
 
 
-def validate_route_request(data: dict) -> dict:
-    """Validate and normalize incoming routing request payload."""
-    if not isinstance(data, dict):
-        raise RouteServiceError('VALIDATION_ERROR', 'Request body must be a JSON object.', 400)
+def _invalid(message: str) -> RouteServiceError:
+    return RouteServiceError('VALIDATION_ERROR', message, 400)
 
-    origin = data.get('origin')
-    if not origin or not isinstance(origin, str) or not origin.strip():
-        raise RouteServiceError('VALIDATION_ERROR', 'Origin location is required.', 400)
 
-    destination = data.get('destination')
-    if not destination or not isinstance(destination, str) or not destination.strip():
-        raise RouteServiceError('VALIDATION_ERROR', 'Destination location is required.', 400)
+def _required_text(data: dict, field: str, message: str) -> str:
+    value = data.get(field)
+    if not value or not isinstance(value, str) or not value.strip():
+        raise _invalid(message)
+    return value.strip()
 
-    if origin.strip().lower() == destination.strip().lower():
-        raise RouteServiceError('VALIDATION_ERROR', 'Origin and destination must not be identical.', 400)
 
-    departure = data.get('departure')
-    if not departure or not isinstance(departure, str) or not departure.strip():
-        raise RouteServiceError('VALIDATION_ERROR', 'Departure datetime is required.', 400)
-
-    try:
-        datetime.fromisoformat(departure.strip().replace('Z', '+00:00'))
-    except ValueError:
-        raise RouteServiceError('VALIDATION_ERROR', 'Departure must be a valid ISO 8601 datetime string.', 400)
-
-    # Support load_weight_lb as canonical and load_weight as alias
+def _parse_load_weight(data: dict) -> float:
+    # "load_weight" is accepted as a shorter alias.
     raw_weight = data.get('load_weight_lb')
     if raw_weight is None:
         raw_weight = data.get('load_weight')
-
     if raw_weight is None:
-        raise RouteServiceError('VALIDATION_ERROR', 'Load weight is required.', 400)
+        raise _invalid('Load weight is required.')
 
     try:
-        load_weight_lb = float(raw_weight)
+        weight = float(raw_weight)
     except (TypeError, ValueError):
-        raise RouteServiceError('VALIDATION_ERROR', 'Load weight must be a numeric value.', 400)
+        raise _invalid('Load weight must be a numeric value.')
 
-    if load_weight_lb <= 0:
-        raise RouteServiceError('VALIDATION_ERROR', 'Load weight must be greater than 0.', 400)
+    if weight <= 0:
+        raise _invalid('Load weight must be greater than 0.')
+    return weight
 
-    # interval_miles validation: optional, defaults to 25. Allowed values: 10, 25, 50.
+
+def _parse_interval(data: dict) -> int:
     raw_interval = data.get('interval_miles')
     if raw_interval is None:
-        interval_miles = 25
-    else:
-        if isinstance(raw_interval, bool) or not isinstance(raw_interval, (int, float)):
-            raise RouteServiceError(
-                'VALIDATION_ERROR',
-                'interval_miles must be an integer (10, 25, or 50).',
-                400,
-            )
-        if raw_interval not in (10, 25, 50):
-            raise RouteServiceError(
-                'VALIDATION_ERROR',
-                'interval_miles must be one of 10, 25, or 50.',
-                400,
-            )
-        interval_miles = int(raw_interval)
+        return DEFAULT_INTERVAL
+
+    # bool is a subclass of int, so rule it out explicitly.
+    if isinstance(raw_interval, bool) or not isinstance(raw_interval, (int, float)):
+        raise _invalid('interval_miles must be an integer (10, 25, or 50).')
+    if raw_interval not in ALLOWED_INTERVALS:
+        raise _invalid('interval_miles must be one of 10, 25, or 50.')
+    return int(raw_interval)
+
+
+def validate_route_request(data: dict) -> dict:
+    """Validate the request body and return clean parameters."""
+    if not isinstance(data, dict):
+        raise _invalid('Request body must be a JSON object.')
+
+    origin = _required_text(data, 'origin', 'Origin location is required.')
+    destination = _required_text(data, 'destination', 'Destination location is required.')
+    if origin.lower() == destination.lower():
+        raise _invalid('Origin and destination must not be identical.')
+
+    departure = _required_text(data, 'departure', 'Departure datetime is required.')
+    try:
+        datetime.fromisoformat(departure.replace('Z', '+00:00'))
+    except ValueError:
+        raise _invalid('Departure must be a valid ISO 8601 datetime string.')
 
     return {
-        'origin': origin.strip(),
-        'destination': destination.strip(),
-        'departure': departure.strip(),
-        'load_weight_lb': load_weight_lb,
-        'interval_miles': interval_miles,
+        'origin': origin,
+        'destination': destination,
+        'departure': departure,
+        'load_weight_lb': _parse_load_weight(data),
+        'interval_miles': _parse_interval(data),
     }
 
 
 @api_view(['POST'])
 def calculate_routes(request):
-    """Calculate truck route alternatives using TomTom Maps Routing API."""
+    """Return route alternatives with weather, risk and a recommendation."""
     try:
         params = validate_route_request(request.data)
-        routes, recommendation = get_route_alternatives(
-            origin=params['origin'],
-            destination=params['destination'],
-            departure=params['departure'],
-            load_weight_lb=params['load_weight_lb'],
-            interval_miles=params['interval_miles'],
-        )
-        return Response(
-            {
-                'routes': routes,
-                'recommendation': recommendation,
-            },
-            status=status.HTTP_200_OK,
-        )
+        routes, recommendation = get_route_alternatives(**params)
     except RouteServiceError as err:
         return Response(
             {'error': {'code': err.code, 'message': err.message}},
             status=err.status_code,
         )
+
+    return Response({'routes': routes, 'recommendation': recommendation})
