@@ -1,8 +1,26 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
 from .services import get_route_alternatives, RouteServiceError
+
+
+@api_view(['GET'])
+def api_root(request):
+    """Service status page shown at the backend root URL."""
+    return Response(
+        {
+            'service': 'Weather-Aware Truck Routing API',
+            'status': 'running',
+            'message': 'Backend is running successfully.',
+            'server_time_utc': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+            'endpoints': {
+                'health': {'method': 'GET', 'path': '/api/health/'},
+                'routes': {'method': 'POST', 'path': '/api/routes/'},
+            },
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(['GET'])
