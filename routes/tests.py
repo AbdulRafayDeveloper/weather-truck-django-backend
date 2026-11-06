@@ -270,6 +270,18 @@ class TomTomGeocodingTests(SimpleTestCase):
         self.assertEqual(coords, {'latitude': 41.88323, 'longitude': -87.6324})
 
     @patch('requests.get')
+    def test_geocoding_is_limited_to_us(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            'results': [{'position': {'lat': 41.14, 'lon': -104.82}, 'score': 4.45}]
+        }
+        mock_get.return_value = mock_resp
+
+        geocode_location('Cheyenne, WY', 'test-tomtom-key')
+        self.assertEqual(mock_get.call_args.kwargs['params']['countrySet'], 'US')
+
+    @patch('requests.get')
     def test_geocoding_ambiguous_results(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

@@ -17,6 +17,7 @@ from .utils import (
 )
 
 TOMTOM_GEOCODE_URL = 'https://api.tomtom.com/search/2/geocode/{query}.json'
+GEOCODE_COUNTRY_SET = 'US'
 TOMTOM_ROUTE_URL = 'https://api.tomtom.com/routing/1/calculateRoute/{origin}:{destination}/json'
 DEFAULT_OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
 
@@ -88,7 +89,9 @@ def _raise_if_ambiguous(query: str, results: list) -> None:
 def geocode_location(query: str, api_key: str) -> dict:
     """Resolve a place name to coordinates."""
     url = TOMTOM_GEOCODE_URL.format(query=query)
-    params = {'key': api_key, 'limit': 3}
+    # The app is built for US trucking (miles, mph, lb). Without a country
+    # filter, "Cheyenne, WY" matches streets called "Cheyenne Way" instead.
+    params = {'key': api_key, 'limit': 3, 'countrySet': GEOCODE_COUNTRY_SET}
 
     try:
         response = requests.get(url, params=params, timeout=10)

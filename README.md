@@ -196,7 +196,7 @@ curl http://127.0.0.1:8000/api/health/
 python manage.py test routes
 ```
 
-There are 114 tests covering geocoding, routing, checkpoint placement, ETAs, weather matching, every risk threshold, the load rules and the recommendation order. TomTom and Open-Meteo are mocked, so the tests run offline and don't need a `.env` file or an API key.
+There are 115 tests covering geocoding, routing, checkpoint placement, ETAs, weather matching, every risk threshold, the load rules and the recommendation order. TomTom and Open-Meteo are mocked, so the tests run offline and don't need a `.env` file or an API key.
 
 ## Deployment
 
