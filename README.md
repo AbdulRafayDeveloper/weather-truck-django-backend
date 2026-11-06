@@ -1,6 +1,20 @@
 # Weather-Aware Truck Routing — Backend API
 
-Backend service for the Weather-Aware Truck Routing system, providing geocoding, multi-alternative commercial truck routing, geographically accurate checkpoint generation with timezone-aware ETA interpolation, Open-Meteo hourly weather forecast integration, environmental risk scoring, and safe route recommendation.
+Django REST API for the Weather-Aware Truck Routing system. It geocodes the trip, requests three commercial truck route alternatives, samples hourly weather at each checkpoint using the truck's estimated arrival time, classifies risk with the required risk and load rules, and recommends the safest route.
+
+**Live API:** https://weather-truck-backend.vercel.app
+**Live app:** https://weathertruck.vercel.app ([frontend repository](https://github.com/AbdulRafayDeveloper/weather-truck))
+
+### Requirements Coverage
+
+| Requirement | Implementation |
+|---|---|
+| Inputs: origin, destination, departure, load weight | `POST /api/routes/` with validation (plus `interval_miles`) |
+| 3 route options via a routing API | TomTom Routing API, `travelMode=truck`, up to 3 alternatives |
+| Weather every 10 / 25 / 50 miles at the truck's ETA | Checkpoints at the chosen interval; ETA interpolated per checkpoint; Open-Meteo hourly forecast matched to that ETA |
+| Risk thresholds and load rules | `routes/risk.py`, thresholds and load overrides exactly as specified (see Section 4) |
+| Recommendation (Severe miles → High miles → avg risk → travel time) | `evaluate_route_recommendations` in `routes/risk.py`; routes with No Travel miles are not eligible |
+| Map, heatmap and 0–48 h slider | Implemented in the [frontend](https://github.com/AbdulRafayDeveloper/weather-truck); the slider re-calls this API with a shifted departure time |
 
 ---
 
@@ -17,9 +31,9 @@ Backend service for the Weather-Aware Truck Routing system, providing geocoding,
 
 ---
 
-## 2. Key Capabilities Implemented (Phases 1 – 6)
+## 2. Key Capabilities
 
-1. **Health Check Endpoint:** `GET /api/health/`
+1. **Status & Health Endpoints:** `GET /` (service status and endpoint list) and `GET /api/health/`
    - Returns service health status and CORS headers for frontend consumption.
 2. **Truck Route Alternatives:** `POST /api/routes/`
    - Accepts origin, destination, departure datetime (ISO 8601), cargo load weight in pounds (`load_weight_lb`), and sampling interval (`interval_miles`: 10, 25, 50; default 25).
@@ -37,12 +51,12 @@ Backend service for the Weather-Aware Truck Routing system, providing geocoding,
    - Ensures monotonic checkpoint arrival times matching the provider arrival instant.
 5. **Progress Fallback:**
    - Deterministically falls back to linear interpolation if provider progress is omitted or unusable, flagging `"progress_source": "interpolated_fallback"` with route warnings.
-6. **Open-Meteo Hourly Weather Integration (Phase 5):**
+6. **Open-Meteo Hourly Weather Integration:**
    - Batched multi-location hourly weather fetching across all route checkpoints (max 50 unique coordinates per request batch).
    - Deduplicates coordinates across overlapping routes to ~11m precision (4 decimal places).
    - Nearest-hour timestamp matching ($\le 30$ min window) with conservative upward tie-breaking.
    - Standardized checkpoint weather payloads (`available`, `partial`, `unavailable`) with wind speed (mph), rain (in), and snowfall (in).
-7. **Weather Risk Scoring & Safe Route Recommendation (Phase 6):**
+7. **Weather Risk Scoring & Safe Route Recommendation:**
    - Exact 5-tier environmental hazard scale: `Low < Moderate < High < Severe < No Travel`.
    - Cargo load-dependent wind overrides (>30,000 lb and >40,000 lb) applied before overall checkpoint risk determination.
    - Route-level segment distance aggregation (`low_miles`, `moderate_miles`, `high_miles`, `severe_miles`, `no_travel_miles`, `unassessed_miles`).
@@ -163,27 +177,24 @@ Weights: $\text{Low} = 1$, $\text{Moderate} = 2$, $\text{High} = 3$, $\text{Seve
 ## 6. Project Structure
 
 ```text
-backend/
+weather-truck-django-backend/
 ├── config/
-│   ├── __init__.py
-│   ├── asgi.py
-│   ├── settings.py
-│   ├── urls.py
-│   └── wsgi.py
+│   ├── settings.py      # Environment-driven settings, CORS, allowed hosts
+│   ├── urls.py          # Root status endpoint + /api/ routes
+│   └── wsgi.py          # WSGI entry point (exposed as `app` for Vercel)
 ├── routes/
-│   ├── __init__.py
-│   ├── apps.py
-│   ├── risk.py
-│   ├── services.py
-│   ├── tests.py
+│   ├── services.py      # TomTom routing/geocoding, checkpoints, ETAs, Open-Meteo weather
+│   ├── risk.py          # Risk thresholds, load rules, aggregation, recommendation
+│   ├── utils.py         # Geometry and time helpers (Haversine, interpolation)
+│   ├── views.py         # API views and request validation
 │   ├── urls.py
-│   ├── utils.py
-│   └── views.py
+│   └── tests.py         # 110 automated tests
 ├── .env.example
-├── .gitignore
 ├── manage.py
-├── README.md
-└── requirements.txt
+├── requirements.txt
+├── vercel.json          # Vercel deployment configuration
+├── render.yaml          # Alternative Render deployment configuration
+└── Procfile
 ```
 
 ---
@@ -262,15 +273,17 @@ python manage.py check
 
 ---
 
-## 10. Current Implementation Status & Roadmap
+## 10. Deployment
 
-- **Completed:**
-  - Phase 1: DRF Foundation, CORS configuration, Health endpoint
-  - Phase 2 & 3: TomTom Maps Routing API v1 truck calculation & Geocoding API v2
-  - Phase 4 & 4.5: Checkpoint generation, ETA interpolation, and sub-tenth mile edge-case audit
-  - Phase 5 & 5.5: Open-Meteo hourly weather forecasting integration & timezone audit
-  - Phase 6, 6.1, 6.2 & 6.3: Weather risk assessment, cargo overrides, 2-decimal distance aggregation & raw-mileage safety eligibility
-- **Pending (Future Phases):**
-  - Phase 7: Trip Planning Input Form (Frontend)
-  - Phase 8: Interactive Map, Routes & Checkpoint Markers (Frontend)
-  - Phase 9: Corridor Heatmap & 48-Hour Forecast Slider (Frontend)
+Deployed on **Vercel** (Python runtime) with continuous deployment from the `main` branch. `vercel.json` routes all requests to `config/wsgi.py`.
+
+| Environment variable | Description |
+|---|---|
+| `TOMTOM_API_KEY` | TomTom Routing & Geocoding API key |
+| `OPEN_METEO_BASE_URL` | `https://api.open-meteo.com/v1/forecast` |
+| `DJANGO_SECRET_KEY` | Strong random secret |
+| `DJANGO_DEBUG` | `False` in production |
+| `DJANGO_ALLOWED_HOSTS` | e.g. `.vercel.app` (`*.vercel.app` is also added automatically on Vercel) |
+| `FRONTEND_URL` | Comma-separated frontend origins allowed by CORS |
+
+A `render.yaml` and `Procfile` are also included for deployment on Render with Gunicorn.
