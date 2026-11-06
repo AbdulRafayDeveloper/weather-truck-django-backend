@@ -23,6 +23,9 @@ ALLOWED_HOSTS = [
 render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
 if render_host and render_host not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(render_host)
+# Vercel serverless deployments (production + preview domains)
+if os.environ.get('VERCEL') and '.vercel.app' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('.vercel.app')
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -95,11 +98,11 @@ REST_FRAMEWORK = {
     ],
 }
 
-# Explicit CORS allowlist for local frontend development
+# Explicit CORS allowlist (FRONTEND_URL accepts a comma-separated list)
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 CORS_ALLOWED_ORIGINS = list(
     dict.fromkeys([
-        FRONTEND_URL,
+        *[url.strip().rstrip('/') for url in FRONTEND_URL.split(',') if url.strip()],
         'http://localhost:5173',
         'http://127.0.0.1:5173',
     ])

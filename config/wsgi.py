@@ -5,3 +5,5 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
 application = get_wsgi_application()
 
+# Vercel's Python runtime looks for a module-level `app`
+app = application
